@@ -14,7 +14,7 @@ appname="BlitzSweep"
 debname="blitzsweep"
 
 # Define 'debvers'
-debvers="5.1.4"
+debvers="5.1.5"
 
 # Define 'debarch'
 debarch="all"
@@ -108,10 +108,11 @@ GenericName=System Cleanup
 Comment=Ubuntu cleanup GUI for caches, logs, snaps and more
 Exec=${execpath}
 TryExec=${execpath}
-Icon=/usr/share/pixmaps/${debname}.png
+Icon=${debname}
 Terminal=false
 Categories=System;Utility;
 StartupNotify=true
+StartupWMClass=${appname}
 Keywords=cleanup;cache;system;maintenance;ubuntu;
 EOF
 chmod 0644 "${pkgroot}/usr/share/applications/${debname}.desktop"

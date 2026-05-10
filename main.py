@@ -25,6 +25,7 @@ from PyQt6.QtCore import QPropertyAnimation
 from PyQt6.QtCore import Qt
 from PyQt6.QtCore import QTimer
 from PyQt6.QtGui import QAction
+from PyQt6.QtGui import QIcon
 from PyQt6.QtGui import QPixmap
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtWidgets import QCheckBox
@@ -50,6 +51,7 @@ from PyQt6.QtWidgets import QTabWidget
 from PyQt6.QtWidgets import QVBoxLayout
 from PyQt6.QtWidgets import QWidget
 from typing import Callable
+from typing import cast
 from typing import Dict
 from typing import List
 from typing import Optional
@@ -60,7 +62,7 @@ from urllib.request import Request
 from urllib.request import urlopen
 
 # Define 'VERSION'
-VERSION = "v5.1.4"
+VERSION = "v5.1.5"
 
 # Define 'APPNAME'
 APPNAME = "BlitzSweep"
@@ -456,9 +458,17 @@ class ShellExec:
         if dryrun:
             return 0
         try:
-            proc = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-            for _ in iter(proc.stdout.readline, ""):
-                pass
+            proc = subprocess.Popen(
+                cmd,
+                shell=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True
+            )
+
+            if proc.stdout is not None:
+                for _ in iter(proc.stdout.readline, ""):
+                    pass
             proc.wait()
             return proc.returncode
         except (OSError, subprocess.SubprocessError):
@@ -1231,7 +1241,9 @@ class SysCleaner:
                     for config_file in program_data["configfiles"]:
                         config_path = uh / config_file
                         if config_path.exists() and config_path.is_file():
-                            self.removecargoline(config_path, program_data["removecontent"])
+                            removecontent = program_data.get("removecontent", "")
+                            if isinstance(removecontent, str):
+                                self.removecargoline(config_path, removecontent)
 
     # Function 'cleanupuser'
     def cleanupuser(self, uh: Path):
@@ -1702,8 +1714,9 @@ class DialogCompleted(QDialog):
         Uses the parent's geometry for accurate positioning.
         """
         self.adjustSize()
-        if self.parent() and isinstance(self.parent(), QWidget):
-            parent: QWidget = self.parent()
+        parent_obj = self.parent()
+        if isinstance(parent_obj, QWidget):
+            parent = cast(QWidget, parent_obj)
             center = parent.geometry().center()
             self.move(center - self.rect().center())
         self.exec()
@@ -1728,69 +1741,115 @@ class BlitzSweep(QWidget):
         Loads persisted configuration and primes default execution options.
         """
         super().__init__()
+
+        iconpath = Path("/usr/share/pixmaps/blitzsweep.png")
+        if iconpath.is_file():
+            appicon = QIcon(str(iconpath))
+            self.setWindowIcon(appicon)
+            appinstance = QApplication.instance()
+            if appinstance is not None:
+                app = cast(QApplication, appinstance)
+                app.setWindowIcon(appicon)
+
         self.setWindowTitle(f"{APPNAME} {VERSION} - Ubuntu Cleanup GUI")
         self.resize(1000, 720)
 
         self.workerthread = None
         self.cleaner: Optional[SysCleaner] = None
-        self.file_queue: "queue.Queue[Tuple[str,int,str]]" = queue.Queue()
+        self.file_queue: "queue.Queue[Tuple[str, int, str]]" = queue.Queue()
 
+        # Create menu bar
         menubar = QMenuBar(self)
+
+        # File menu
         mfile = menubar.addMenu("File")
-        actquit = QAction("Quit", self)
-        actquit.triggered.connect(QApplication.quit)
-        mfile.addAction(actquit)
+        if mfile is not None:
+            actquit = QAction("Quit", self)
+            actquit.triggered.connect(QApplication.quit)
+            mfile.addAction(actquit)
 
+        # Edit menu
         medit = menubar.addMenu("Edit")
-        actprefs = QAction("Preferences", self)
-        actprefs.triggered.connect(self.onprefs)
-        medit.addAction(actprefs)
+        if medit is not None:
+            actprefs = QAction("Preferences", self)
+            actprefs.triggered.connect(self.onprefs)
+            medit.addAction(actprefs)
 
+        # Help menu
         mhelp = menubar.addMenu("Help")
-        actabout = QAction("About", self)
-        actabout.triggered.connect(self.onabout)
-        mhelp.addAction(actabout)
+        if mhelp is not None:
+            actabout = QAction("About", self)
+            actabout.triggered.connect(self.onabout)
+            mhelp.addAction(actabout)
 
+        # User selection combo box
         self.cmb_user = QComboBox()
         self.users = UserDiscovery.listusers()
         for u, home in self.users:
             self.cmb_user.addItem(f"{u}  —  {home}", (u, home))
 
+        # Total cleaned space label
         self.lbltotal = QLabel("Cleared Space\n0.00 MB")
-        self.lbltotal.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.lbltotal.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
         self.lbltotal.setStyleSheet("font-weight: 600;")
 
+        # User selection row
         userrow = QHBoxLayout()
         userrow.addWidget(QLabel("User to clean:"))
         userrow.addWidget(self.cmb_user)
         userrow.addStretch()
         userrow.addWidget(self.lbltotal)
 
+        # Action buttons
         self.btndry = QPushButton("Dry-Run")
         self.btnrun = QPushButton("Run")
         self.btnstop = QPushButton("Stop")
         self.btnstop.setEnabled(False)
+
         btns = QHBoxLayout()
         btns.addWidget(self.btndry)
         btns.addWidget(self.btnrun)
         btns.addWidget(self.btnstop)
         btns.addStretch()
 
+        # Progress indicator
         self.progress = QProgressBar()
         self.progress.setRange(0, 0)
         self.progress.setVisible(False)
 
+        # Results table
         self.table = QTableWidget(0, 3)
         self.table.setHorizontalHeaderLabels(["Filepath", "Size", "Modified"])
+
+        # Horizontal header configuration
         header = self.table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-        self.table.verticalHeader().setVisible(False)
-        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        if header is not None:
+            header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+            header.setSectionResizeMode(
+                1,
+                QHeaderView.ResizeMode.ResizeToContents
+            )
+            header.setSectionResizeMode(
+                2,
+                QHeaderView.ResizeMode.ResizeToContents
+            )
+
+        # Vertical header configuration
+        vertical_header = self.table.verticalHeader()
+        if vertical_header is not None:
+            vertical_header.setVisible(False)
+
+        self.table.setEditTriggers(
+            QTableWidget.EditTrigger.NoEditTriggers
+        )
+        self.table.setSelectionBehavior(
+            QTableWidget.SelectionBehavior.SelectRows
+        )
         self.table.setShowGrid(True)
 
+        # Main layout
         root = QVBoxLayout()
         root.setMenuBar(menubar)
         root.addLayout(userrow)
@@ -1799,22 +1858,34 @@ class BlitzSweep(QWidget):
         root.addWidget(self.progress)
         self.setLayout(root)
 
-        self.btndry.clicked.connect(lambda: self.onrun(dry=True))
-        self.btnrun.clicked.connect(lambda: self.onrun(dry=False))
+        # Connect button signals
+        self.btndry.clicked.connect(
+            lambda: self.onrun(dry=True)
+        )
+        self.btnrun.clicked.connect(
+            lambda: self.onrun(dry=False)
+        )
         self.btnstop.clicked.connect(self.onstop)
 
+        # Timer for flushing queued rows into the table
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.flushrows)
         self.timer.start(100)
 
+        # Runtime state
         self.opts = ExecOpts()
         self.prefsexecbootstart = False
         self.prefsexecshutdown = False
         self.pathopts: Dict[str, bool] = {}
         self.showbytes = 0
+
+        # Load persisted configuration
         self.confloader()
 
+        # Completion signal
         self.completed.connect(self.complethandler)
+
+        # Optional fade animation
         self.fadeanimation: Optional[QPropertyAnimation] = None
 
     # Function 'confloader'
@@ -1996,9 +2067,14 @@ class BlitzSweep(QWidget):
             return
 
         self.confpersist()
+
         if not self.opts.dryrun and self.opts.username and SysUtils.rootcheck():
             try:
-                ProcessManager.closeprograms(self.opts.username, excpids={os.getpid()}, gracesecs=5)
+                ProcessManager.closeprograms(
+                    self.opts.username,
+                    excpids={os.getpid()},
+                    gracesecs=5
+                )
             except (OSError, PermissionError, subprocess.SubprocessError, ValueError):
                 pass
 
@@ -2018,65 +2094,116 @@ class BlitzSweep(QWidget):
             """
             success = True
             errmsg = ""
+
             try:
                 if rootneed:
                     with tempfile.NamedTemporaryFile("w", delete=False, encoding="utf-8") as tf:
                         tf.write(json.dumps(self.opts.todict()))
                         tf.flush()
                         optsfile = tf.name
-                    try:
-                        cmd = ["pkexec", sys.executable, sys.argv[0], "--worker", optsfile]
-                        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
 
-                        for line in iter(proc.stdout.readline, ""):
-                            if not line:
-                                break
-                            line = line.rstrip("\n")
-                            if line.startswith("ROW\t"):
-                                parts = line.split("\t", 3)
-                                if len(parts) == 4:
-                                    _, path, size_str, mtime = parts
-                                    try:
-                                        size_b = int(size_str)
-                                    except ValueError:
-                                        size_b = 0
-                                    self.filerow(path, size_b, mtime)
-                            elif line.startswith("TOTAL\t"):
-                                parts = line.split("\t", 2)
-                                if len(parts) >= 2:
-                                    try:
-                                        total_b = int(parts[1])
-                                        self.showbytes = total_b
-                                        self.lbltotal.setText(f"Cleared Space\n{SysUtils.unitsize(total_b)}")
-                                    except (ValueError, TypeError, OverflowError):
-                                        pass
-                            elif line.startswith("ERROR\t"):
-                                success = False
-                                errmsg = line.split("\t", 1)[1] if "\t" in line else "Unknown error."
+                    try:
+                        cmd = [
+                            "pkexec",
+                            sys.executable,
+                            sys.argv[0],
+                            "--worker",
+                            optsfile
+                        ]
+
+                        proc = subprocess.Popen(
+                            cmd,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT,
+                            text=True
+                        )
+
+                        # PyQt/type-checker safety:
+                        # subprocess.Popen.stdout is typed as IO[str] | None.
+                        if proc.stdout is not None:
+                            for line in iter(proc.stdout.readline, ""):
+                                if not line:
+                                    break
+
+                                line = line.rstrip("\n")
+
+                                if line.startswith("ROW\t"):
+                                    parts = line.split("\t", 3)
+                                    if len(parts) == 4:
+                                        _, path, size_str, mtime = parts
+                                        try:
+                                            size_b = int(size_str)
+                                        except ValueError:
+                                            size_b = 0
+                                        self.filerow(path, size_b, mtime)
+
+                                elif line.startswith("TOTAL\t"):
+                                    parts = line.split("\t", 2)
+                                    if len(parts) >= 2:
+                                        try:
+                                            total_b = int(parts[1])
+                                            self.showbytes = total_b
+                                            self.lbltotal.setText(
+                                                f"Cleared Space\n{SysUtils.unitsize(total_b)}"
+                                            )
+                                        except (ValueError, TypeError, OverflowError):
+                                            pass
+
+                                elif line.startswith("ERROR\t"):
+                                    success = False
+                                    errmsg = (
+                                        line.split("\t", 1)[1]
+                                        if "\t" in line
+                                        else "Unknown error."
+                                    )
+
                         proc.wait()
+
                         if proc.returncode != 0:
                             success = False
                             if not errmsg:
                                 errmsg = f"Worker exited with code {proc.returncode}."
+
                     finally:
                         try:
                             os.unlink(optsfile)
                         except OSError:
                             pass
+
                 else:
                     try:
-                        self.cleaner = SysCleaner(self.opts, self.filerow, self.pathopts)
-                        self.cleaner.run()
-                        self.showbytes = getattr(self.cleaner, "totalbytes", self.showbytes)
-                        self.lbltotal.setText(f"Cleared Space\n{SysUtils.unitsize(self.showbytes)}")
-                    except (OSError, PermissionError, subprocess.SubprocessError, ValueError, RuntimeError) as e:
+                        # Assign to a local variable first so the type checker
+                        # knows this object is definitely a SysCleaner, not None.
+                        cleaner = SysCleaner(self.opts, self.filerow, self.pathopts)
+                        self.cleaner = cleaner
+
+                        cleaner.run()
+
+                        self.showbytes = getattr(
+                            cleaner,
+                            "totalbytes",
+                            self.showbytes
+                        )
+                        self.lbltotal.setText(
+                            f"Cleared Space\n{SysUtils.unitsize(self.showbytes)}"
+                        )
+
+                    except (
+                            OSError,
+                            PermissionError,
+                            subprocess.SubprocessError,
+                            ValueError,
+                            RuntimeError
+                    ) as e:
                         success = False
                         errmsg = f"{e}"
+
             finally:
                 self.progress.setVisible(False)
                 self.btnstop.setEnabled(False)
                 self.btnrun.setEnabled(True)
                 self.btndry.setEnabled(True)
+
                 try:
                     self.completed.emit(success, errmsg)
                 except RuntimeError:
