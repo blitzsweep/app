@@ -62,7 +62,7 @@ from urllib.request import Request
 from urllib.request import urlopen
 
 # Define 'VERSION'
-VERSION = "v5.1.5"
+VERSION = "v5.1.6"
 
 # Define 'APPNAME'
 APPNAME = "BlitzSweep"
@@ -419,7 +419,7 @@ class SysUtils:
     def filesize(p: Path) -> int:
         """
         Compute size in bytes for a file, or shallow total for a directory.
-        For directories it sums direct children file sizes and ignores errors.
+        For directories, it sums direct children file sizes and ignores errors.
         Returns 0 when size cannot be determined or the path is missing.
         """
         try:
@@ -474,9 +474,9 @@ class ShellExec:
         except (OSError, subprocess.SubprocessError):
             return 1
 
-    # Function 'capture'
+    # Function 'stdcapture'
     @staticmethod
-    def capture(cmd: str) -> Tuple[int, str]:
+    def stdcapture(cmd: str) -> Tuple[int, str]:
         """
         Run a command and capture combined stdout/stderr as text.
         Returns a tuple of (exit_code, output) for downstream parsing.
@@ -509,7 +509,7 @@ class ShellExec:
             pass
 
         attempts = [
-            f"runuser -u {shlex.quote(username)} -- sh -lc {shlex.quote(envprefix + cmd)}",
+            f"unuser -u {shlex.quote(username)} -- sh -lc {shlex.quote(envprefix + cmd)}",
             f"sudo -u {shlex.quote(username)} sh -lc {shlex.quote(envprefix + cmd)}",
             f"su -s /bin/sh -c {shlex.quote(envprefix + cmd)} {shlex.quote(username)}",
         ]
@@ -560,7 +560,7 @@ class ProcessManager:
         if excpids is None:
             excpids = set()
         excpids.add(os.getpid())
-        ec, out = ShellExec.capture(f"ps -u {shlex.quote(username)} -o pid=,comm=")
+        ec, out = ShellExec.stdcapture(f"ps -u {shlex.quote(username)} -o pid=,comm=")
         if ec != 0 or not out.strip():
             return
 
@@ -685,8 +685,7 @@ class ExecOpts:
             dryrun=bool(d.get("dryrun", False)),
             clearbrowsers=bool(d.get("clearbrowsers", False)),
             clearkernels=bool(d.get("clearkernels", False)),
-            vacuumdays=int(d.get("vacuumdays,") or d.get("vacuumdays", 7)) if isinstance(d.get("vacuumdays", 7),
-                                                                                         (str, int)) else 7,
+            vacuumdays=int(d.get("vacuumdays,") or d.get("vacuumdays", 7)) if isinstance(d.get("vacuumdays", 7), (str, int)) else 7,
             vacuumsize=str(d.get("vacuumsize", "100M")),
             keepsnaps=int(d.get("keepsnaps", 2)),
             shutafter=bool(d.get("shutafter", False)),
@@ -867,7 +866,6 @@ class FileOps:
                     if p.is_file():
                         total += p.stat().st_size
                     elif p.is_dir():
-                        # Add directory itself as 0 bytes for counting purposes
                         pass
                 except (OSError, PermissionError, FileNotFoundError):
                     pass
@@ -903,9 +901,9 @@ class FileOps:
         except (OSError, PermissionError, FileNotFoundError):
             return 0
 
-    # Function 'globdel'
+    # Function 'globaldelete'
     @staticmethod
-    def globdel(dirpath: Path, pattern: str, dryrun: bool, cb: FileRowCB) -> int:
+    def globaldelete(dirpath: Path, pattern: str, dryrun: bool, cb: FileRowCB) -> int:
         """
         Delete files matching a glob-like pattern under a base directory.
         Emits rows for matched paths and honors dry-run for safety.
@@ -921,7 +919,6 @@ class FileOps:
                 elif dryrun and p.is_dir():
                     FileOps.emitrow(cb, p)
                 elif p.is_dir():
-                    # remove the directory itself
                     total += FileOps.removefile(p, dryrun, cb)
             return total
         except (OSError, PermissionError, FileNotFoundError):
@@ -946,23 +943,23 @@ class DockerCleaner:
         """
         dryrun = opts.dryrun
         if opts.dockercontainers:
-            ec, out = ShellExec.capture("docker ps -aq")
+            ec, out = ShellExec.stdcapture("docker ps -aq")
             if ec == 0 and out.strip():
                 ShellExec.cmdrun("docker stop $(docker ps -aq)", dryrun)
                 ShellExec.cmdrun("docker rm $(docker ps -aq)", dryrun)
 
         if opts.dockerimages:
-            ec, out = ShellExec.capture("docker images -q")
+            ec, out = ShellExec.stdcapture("docker images -q")
             if ec == 0 and out.strip():
                 ShellExec.cmdrun("docker rmi -f $(docker images -q)", dryrun)
 
         if opts.dockervolumes:
-            ec, out = ShellExec.capture("docker volume ls -q")
+            ec, out = ShellExec.stdcapture("docker volume ls -q")
             if ec == 0 and out.strip():
                 ShellExec.cmdrun("docker volume rm $(docker volume ls -q)", dryrun)
 
         if opts.dockernetworks:
-            ec, out = ShellExec.capture("docker network ls -q")
+            ec, out = ShellExec.stdcapture("docker network ls -q")
             if ec == 0 and out.strip():
                 ShellExec.cmdrun(
                     "docker network rm $(docker network ls -q | xargs -n1 docker network inspect -f '{{.Name}} {{.ID}}' | grep -v '^bridge ' | grep -v '^host ' | grep -v '^none ' | awk '{print $2}')",
@@ -1000,7 +997,7 @@ class SysCleaner:
     # Function 'loadstop'
     def loadstop(self):
         """
-        Request that the running cleanup operation be cancelled.
+        Request that the running cleanup operation be canceled.
         Sets an internal flag checked periodically during traversal.
         Long-running operations exit gracefully by raising at checkpoints.
         """
@@ -1092,7 +1089,6 @@ class SysCleaner:
             return
         p = (uh / rel).expanduser()
         if p.is_dir():
-            # Remove the directory itself after cleaning its contents
             self.addbytes(FileOps.removetree(p, self.opts.dryrun, self.filecb))
         else:
             self.addbytes(FileOps.removefile(p, self.opts.dryrun, self.filecb))
@@ -1153,53 +1149,40 @@ class SysCleaner:
                 self.filecb(f"Would remove Cargo line from {filepath}", 0, "-")
                 return
 
-            # Read the file
             content = filepath.read_text(encoding='utf-8')
-            lines = content.splitlines(keepends=True)  # keepends preserves line endings
+            lines = content.splitlines(keepends=True)
 
-            # Track if we found and removed any lines
-            lines_removed = []
+            remlines = []
             for line in lines:
-                stripped_line = line.strip()
-                # Check if line contains the Cargo env line (exact match or with whitespace)
-                if removecontent.strip() in stripped_line:
-                    # Check for exact match or if the line starts with the removecontent
-                    if (stripped_line == removecontent.strip() or
-                            stripped_line.startswith(removecontent.strip())):
-                        continue  # Skip this line
-                lines_removed.append(line)
+                stripline = line.strip()
+                if removecontent.strip() in stripline:
+                    if (stripline == removecontent.strip() or
+                            stripline.startswith(removecontent.strip())):
+                        continue
+                remlines.append(line)
 
-            # If we removed any lines, write the file back
-            if len(lines_removed) != len(lines):
-                # Create backup
-                backup_path = filepath.with_suffix(filepath.suffix + '.blitzsweep.bak')
+            if len(remlines) != len(lines):
+                pathbackup = filepath.with_suffix(filepath.suffix + '.blitzsweep.bak')
                 try:
-                    shutil.copy2(filepath, backup_path)
+                    shutil.copy2(filepath, pathbackup)
                 except (OSError, PermissionError):
                     pass
 
-                # Write new content, preserving original newlines
-                new_content = ''.join(lines_removed)
-
-                # Remove any trailing blank lines left after removal
+                new_content = ''.join(remlines)
                 new_content = new_content.rstrip('\n') + '\n' if new_content.strip() else new_content.rstrip('\n')
-
                 filepath.write_text(new_content, encoding='utf-8')
 
-                # Try to remove backup (optional cleanup)
                 try:
-                    if backup_path.exists():
-                        backup_path.unlink()
+                    if pathbackup.exists():
+                        pathbackup.unlink()
                 except (OSError, PermissionError):
                     pass
 
                 self.filecb(f"Removed Cargo line from {filepath}", 0, "-")
             else:
-                # Line not found in file
                 self.filecb(f"No Cargo line found in {filepath}", 0, "-")
 
         except (OSError, PermissionError, UnicodeDecodeError) as e:
-            # If we can't process the file, skip it
             self.filecb(f"Failed to process {filepath}: {str(e)}", 0, "-")
 
     # Function 'cleanupprograms'
@@ -1215,7 +1198,6 @@ class SysCleaner:
                 continue
             self.checkstop()
 
-            # Clean all paths for this program
             for rel in program_data["paths"]:
                 self.checkstop()
                 p = (uh / rel).expanduser()
@@ -1225,16 +1207,13 @@ class SysCleaner:
                     else:
                         self.addbytes(FileOps.removefile(p, self.opts.dryrun, self.filecb))
 
-            # Special handling for Evolution
             if program_name == "Evolution" and self.enabled(f"program.{program_name}"):
                 self.checkstop()
                 if not self.opts.dryrun:
                     ShellExec.cmdrun("dconf reset -f /org/gnome/evolution/", dryrun=False)
                 else:
-                    # In dry-run mode, just emit a row for the dconf operation
                     self.filecb("dconf reset -f /org/gnome/evolution/", 0, "-")
 
-            # Special handling for Cargo
             if program_name == "Cargo" and self.enabled(f"program.{program_name}"):
                 self.checkstop()
                 if program_data["configfiles"] and program_data["removecontent"]:
@@ -1256,9 +1235,7 @@ class SysCleaner:
         username = Path(uh).name if str(uh) != "/root" else "root"
         self.trashlist(username=username, home=str(uh))
 
-        # Clean programs first
         self.cleanupprograms(uh)
-
         for rel in USERPATH:
             self.checkstop()
             self.useritem(uh, rel)
@@ -1296,7 +1273,7 @@ class SysCleaner:
             if not self.enabled(key):
                 continue
             self.checkstop()
-            self.addbytes(FileOps.globdel(Path(base), pat, self.opts.dryrun, self.filecb))
+            self.addbytes(FileOps.globaldelete(Path(base), pat, self.opts.dryrun, self.filecb))
 
         ShellExec.cmdrun(f"journalctl --vacuum-time={self.opts.vacuumdays}d", self.opts.dryrun)
         ShellExec.cmdrun(f"journalctl --vacuum-size={self.opts.vacuumsize}", self.opts.dryrun)
@@ -1308,7 +1285,7 @@ class SysCleaner:
 
         if not self.opts.dryrun:
             cmd = r"snap list --all 2>/dev/null | awk '/disabled/ {print $1, $3}'"
-            ec, out = ShellExec.capture(cmd)
+            ec, out = ShellExec.stdcapture(cmd)
             if ec == 0 and out.strip():
                 for line in out.strip().splitlines():
                     parts = line.split()
@@ -1348,7 +1325,7 @@ class SysCleaner:
         Used to identify which linux-image packages must be preserved.
         Falls back to empty string on execution or parsing errors.
         """
-        ec, out = ShellExec.capture("uname -r | sed 's/-generic//'")
+        ec, out = ShellExec.stdcapture("uname -r | sed 's/-generic//'")
         return out.strip() if ec == 0 else ""
 
     # Function 'kernelold'
@@ -1359,7 +1336,7 @@ class SysCleaner:
         Parses dpkg output and filters by the provided current version.
         Returns a list of package names safe to purge if desired.
         """
-        ec, out = ShellExec.capture("dpkg -l | awk '/^ii\\s+linux-image-[0-9]/{print $2}'")
+        ec, out = ShellExec.stdcapture("dpkg -l | awk '/^ii\\s+linux-image-[0-9]/{print $2}'")
         pkgs: List[str] = []
         if ec == 0:
             for line in out.strip().splitlines():
@@ -1428,7 +1405,6 @@ class DialogPrefs(QDialog):
         self.pathopts = pathopts.copy()
         tabs = QTabWidget(self)
 
-        # --- General
         wgen = QWidget()
         g = QFormLayout(wgen)
         self.cbshutdown = QCheckBox("Shutdown after cleanup")
@@ -1484,16 +1460,12 @@ class DialogPrefs(QDialog):
             inner = QVBoxLayout(box)
             for program_name in sorted(programs.keys()):
                 cb = QCheckBox(program_name)
-                # Use "program." prefix for program options
                 cb.setChecked(self.pathopts.get(f"program.{program_name}", True))
                 self.chk_map[f"program.{program_name}"] = cb
                 inner.addWidget(cb)
             v.addWidget(box)
 
-        # Add Programs section first
         addprogramsection("Programs", PROGRAMS)
-
-        # Add other sections
         addsection("User: Paths", USERPATH)
         addsection("User: Histories", USERHISTORY)
         addsection("User: Browsers", USERBROWSERS)
@@ -1503,7 +1475,6 @@ class DialogPrefs(QDialog):
         addsection("System: Directories", SYSDIRS)
         addsection("System: Logs", [f"{base}::{pat}" for base, pat in SYSGLOBS])
 
-        # Docker section
         dockerbox = QGroupBox("Docker")
         dockerinner = QVBoxLayout(dockerbox)
         self.cbdockercontainers = QCheckBox("Containers")
@@ -1556,8 +1527,6 @@ class DialogPrefs(QDialog):
         self.opts.vacuumdays = self.spindays.value()
         self.opts.vacuumsize = self.editsize.text().strip() or "100M"
         self.opts.keepsnaps = self.spinkeep.value()
-
-        # Docker flags
         self.opts.dockercontainers = self.cbdockercontainers.isChecked()
         self.opts.dockerimages = self.cbdockerimages.isChecked()
         self.opts.dockervolumes = self.cbdockervolumes.isChecked()
@@ -1603,8 +1572,7 @@ class DialogAbout(QDialog):
                     break
 
         if pix:
-            logolabel.setPixmap(
-                pix.scaled(96, 96, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+            logolabel.setPixmap(pix.scaled(96, 96, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
 
         title = QLabel(f"<b>{APPNAME}</b>")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -1677,8 +1645,7 @@ class DialogCompleted(QDialog):
                     pix = tmp
                     break
         if pix:
-            iconlabel.setPixmap(
-                pix.scaled(96, 96, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+            iconlabel.setPixmap(pix.scaled(96, 96, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
 
         title = QLabel("<b>Cleanup finished successfully</b>" if not error_message else "<b>Cleanup failed</b>")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -1741,7 +1708,6 @@ class BlitzSweep(QWidget):
         Loads persisted configuration and primes default execution options.
         """
         super().__init__()
-
         iconpath = Path("/usr/share/pixmaps/blitzsweep.png")
         if iconpath.is_file():
             appicon = QIcon(str(iconpath))
@@ -1758,51 +1724,40 @@ class BlitzSweep(QWidget):
         self.cleaner: Optional[SysCleaner] = None
         self.file_queue: "queue.Queue[Tuple[str, int, str]]" = queue.Queue()
 
-        # Create menu bar
         menubar = QMenuBar(self)
-
-        # File menu
         mfile = menubar.addMenu("File")
         if mfile is not None:
             actquit = QAction("Quit", self)
             actquit.triggered.connect(QApplication.quit)
             mfile.addAction(actquit)
 
-        # Edit menu
         medit = menubar.addMenu("Edit")
         if medit is not None:
             actprefs = QAction("Preferences", self)
             actprefs.triggered.connect(self.onprefs)
             medit.addAction(actprefs)
 
-        # Help menu
         mhelp = menubar.addMenu("Help")
         if mhelp is not None:
             actabout = QAction("About", self)
             actabout.triggered.connect(self.onabout)
             mhelp.addAction(actabout)
 
-        # User selection combo box
         self.cmb_user = QComboBox()
         self.users = UserDiscovery.listusers()
         for u, home in self.users:
             self.cmb_user.addItem(f"{u}  —  {home}", (u, home))
 
-        # Total cleaned space label
         self.lbltotal = QLabel("Cleared Space\n0.00 MB")
-        self.lbltotal.setAlignment(
-            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
-        )
+        self.lbltotal.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.lbltotal.setStyleSheet("font-weight: 600;")
 
-        # User selection row
         userrow = QHBoxLayout()
         userrow.addWidget(QLabel("User to clean:"))
         userrow.addWidget(self.cmb_user)
         userrow.addStretch()
         userrow.addWidget(self.lbltotal)
 
-        # Action buttons
         self.btndry = QPushButton("Dry-Run")
         self.btnrun = QPushButton("Run")
         self.btnstop = QPushButton("Stop")
@@ -1814,16 +1769,13 @@ class BlitzSweep(QWidget):
         btns.addWidget(self.btnstop)
         btns.addStretch()
 
-        # Progress indicator
         self.progress = QProgressBar()
         self.progress.setRange(0, 0)
         self.progress.setVisible(False)
 
-        # Results table
         self.table = QTableWidget(0, 3)
         self.table.setHorizontalHeaderLabels(["Filepath", "Size", "Modified"])
 
-        # Horizontal header configuration
         header = self.table.horizontalHeader()
         if header is not None:
             header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
@@ -1836,7 +1788,6 @@ class BlitzSweep(QWidget):
                 QHeaderView.ResizeMode.ResizeToContents
             )
 
-        # Vertical header configuration
         vertical_header = self.table.verticalHeader()
         if vertical_header is not None:
             vertical_header.setVisible(False)
@@ -1849,7 +1800,6 @@ class BlitzSweep(QWidget):
         )
         self.table.setShowGrid(True)
 
-        # Main layout
         root = QVBoxLayout()
         root.setMenuBar(menubar)
         root.addLayout(userrow)
@@ -1858,34 +1808,22 @@ class BlitzSweep(QWidget):
         root.addWidget(self.progress)
         self.setLayout(root)
 
-        # Connect button signals
-        self.btndry.clicked.connect(
-            lambda: self.onrun(dry=True)
-        )
-        self.btnrun.clicked.connect(
-            lambda: self.onrun(dry=False)
-        )
+        self.btndry.clicked.connect(lambda: self.onrun(dry=True))
+        self.btnrun.clicked.connect(lambda: self.onrun(dry=False))
         self.btnstop.clicked.connect(self.onstop)
 
-        # Timer for flushing queued rows into the table
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.flushrows)
         self.timer.start(100)
 
-        # Runtime state
         self.opts = ExecOpts()
         self.prefsexecbootstart = False
         self.prefsexecshutdown = False
         self.pathopts: Dict[str, bool] = {}
         self.showbytes = 0
 
-        # Load persisted configuration
         self.confloader()
-
-        # Completion signal
         self.completed.connect(self.complethandler)
-
-        # Optional fade animation
         self.fadeanimation: Optional[QPropertyAnimation] = None
 
     # Function 'confloader'
@@ -1930,27 +1868,25 @@ class BlitzSweep(QWidget):
         self.prefsexecbootstart = loadbool("runbootstart", False)
         self.prefsexecshutdown = loadbool("runshutdown", False)
 
-        # Docker granular flags
         self.opts.dockercontainers = loadbool("dockercontainers", False)
         self.opts.dockerimages = loadbool("dockerimages", False)
         self.opts.dockervolumes = loadbool("dockervolumes", False)
         self.opts.dockernetworks = loadbool("dockernetworks", False)
 
         all_keys = (
-                USERPATH
-                + USERHISTORY
-                + USERBROWSERS
-                + USERMISCS
-                + USERAGGRESIVE
-                + ROOTITEMS
-                + SYSDIRS
-                + [f"{base}::{pat}" for base, pat in SYSGLOBS]
+            USERPATH
+            + USERHISTORY
+            + USERBROWSERS
+            + USERMISCS
+            + USERAGGRESIVE
+            + ROOTITEMS
+            + SYSDIRS
+            + [f"{base}::{pat}" for base, pat in SYSGLOBS]
         )
 
         for k in all_keys:
             self.pathopts[k] = loadbool(f"options.{k}", True)
 
-        # Load program options
         for program_name in PROGRAMS.keys():
             self.pathopts[f"program.{program_name}"] = loadbool(f"options.program.{program_name}", True)
 
@@ -2090,7 +2026,7 @@ class BlitzSweep(QWidget):
             """
             Worker function executed on a background thread.
             Runs cleanup locally or via pkexec, streaming rows back to UI.
-            Restores UI controls when work completes or is cancelled.
+            Restores UI controls when work completes or is canceled.
             """
             success = True
             errmsg = ""
@@ -2118,8 +2054,6 @@ class BlitzSweep(QWidget):
                             text=True
                         )
 
-                        # PyQt/type-checker safety:
-                        # subprocess.Popen.stdout is typed as IO[str] | None.
                         if proc.stdout is not None:
                             for line in iter(proc.stdout.readline, ""):
                                 if not line:
@@ -2172,13 +2106,10 @@ class BlitzSweep(QWidget):
 
                 else:
                     try:
-                        # Assign to a local variable first so the type checker
-                        # knows this object is definitely a SysCleaner, not None.
                         cleaner = SysCleaner(self.opts, self.filerow, self.pathopts)
                         self.cleaner = cleaner
 
                         cleaner.run()
-
                         self.showbytes = getattr(
                             cleaner,
                             "totalbytes",
@@ -2189,11 +2120,11 @@ class BlitzSweep(QWidget):
                         )
 
                     except (
-                            OSError,
-                            PermissionError,
-                            subprocess.SubprocessError,
-                            ValueError,
-                            RuntimeError
+                        OSError,
+                        PermissionError,
+                        subprocess.SubprocessError,
+                        ValueError,
+                        RuntimeError
                     ) as e:
                         success = False
                         errmsg = f"{e}"
@@ -2219,7 +2150,6 @@ class BlitzSweep(QWidget):
         Waits for user to close the popup via Close button or window close.
         Then clears the file list with a smooth fade-out animation.
         """
-        # In dry-run mode, do not show a popup and keep table contents intact.
         if self.opts.dryrun:
             return
 
@@ -2379,14 +2309,7 @@ class UpdateChecker:
                     pix = tmp
                     break
         if pix:
-            logolabel.setPixmap(
-                pix.scaled(
-                    96,
-                    96,
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation,
-                )
-            )
+            logolabel.setPixmap(pix.scaled(96, 96, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
 
         title = QLabel(f"<b>A new version of {self.appname} is available</b>")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -2450,23 +2373,21 @@ class AppEntry:
             cfg = ConfigManager.load()
             pathopts: Dict[str, bool] = {}
             all_keys = (
-                    USERPATH
-                    + USERHISTORY
-                    + USERBROWSERS
-                    + USERMISCS
-                    + USERAGGRESIVE
-                    + ROOTITEMS
-                    + SYSDIRS
-                    + [f"{base}::{pat}" for base, pat in SYSGLOBS]
+                USERPATH
+                + USERHISTORY
+                + USERBROWSERS
+                + USERMISCS
+                + USERAGGRESIVE
+                + ROOTITEMS
+                + SYSDIRS
+                + [f"{base}::{pat}" for base, pat in SYSGLOBS]
             )
 
             for k in all_keys:
                 pathopts[k] = cfg.get(f"options.{k}", "1") in ("1", "true", "True", "yes")
 
-            # Load program options
             for program_name in PROGRAMS.keys():
-                pathopts[f"program.{program_name}"] = cfg.get(f"options.program.{program_name}", "1") in ("1", "true",
-                                                                                                          "True", "yes")
+                pathopts[f"program.{program_name}"] = cfg.get(f"options.program.{program_name}", "1") in ("1", "true", "True", "yes")
 
             # Function 'rowcheckbox'
             def rowcheckbox(path: str, size_b: int, mtime: str):
@@ -2493,6 +2414,8 @@ class AppEntry:
                     print("TOTAL\t0", flush=True)
                 return 1
 
+        os.environ["QT_LOGGING_RULES"] = "qt.qpa.*=false"
+        signal.signal(signal.SIGINT, signal.SIG_DFL)
         app = QApplication(sys.argv)
         win = BlitzSweep()
         win.show()
@@ -2504,6 +2427,7 @@ class AppEntry:
             gitrepo="neoslab/blitzsweep",
             logo_paths=[Path("/usr/share/pixmaps/blitzsweep.png")],
         )
+
         win.updatecheck = checker
         QTimer.singleShot(1500, checker.checknotify)
         sys.exit(app.exec())

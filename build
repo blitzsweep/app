@@ -14,7 +14,7 @@ appname="BlitzSweep"
 debname="blitzsweep"
 
 # Define 'debvers'
-debvers="5.1.5"
+debvers="5.1.6"
 
 # Define 'debarch'
 debarch="all"
