@@ -7,13 +7,13 @@ import os
 import queue
 import shlex
 import shutil
+import signal
+import socket
+import stat
 import subprocess
 import sys
 import tempfile
 import threading
-import socket
-import stat
-import signal
 import time
 
 # Import PIP packages
@@ -25,6 +25,7 @@ from PyQt6.QtCore import QPropertyAnimation
 from PyQt6.QtCore import Qt
 from PyQt6.QtCore import QTimer
 from PyQt6.QtGui import QAction
+from PyQt6.QtGui import QGuiApplication
 from PyQt6.QtGui import QIcon
 from PyQt6.QtGui import QPixmap
 from PyQt6.QtWidgets import QApplication
@@ -62,7 +63,7 @@ from urllib.request import Request
 from urllib.request import urlopen
 
 # Define 'VERSION'
-VERSION = "v5.1.6"
+VERSION = "v5.1.7"
 
 # Define 'APPNAME'
 APPNAME = "BlitzSweep"
@@ -108,7 +109,7 @@ USERPATH = [
     ".zshrc.bak"
 ]
 
-# Define 'PROGRAMS' with corrected structure
+# Define 'PROGRAMS' with structure
 PROGRAMS = {
     "Android": {
         "paths": [".android", "Android"],
@@ -366,18 +367,18 @@ FileRowCB = Callable[[str, int, str], None]
 # Class 'SysUtils'
 class SysUtils:
     """
-    Collection of static utility helpers for filesystem and system information.
-    Provides size formatting, free space queries, mtime formatting, and size calculation.
-    Centralized helpers keep logic consistent and reusable across the app.
+    Provides system-level utility functions for file operations.
+    Includes methods for checking root privileges and calculating file sizes.
+    Handles timestamp formatting and unit conversion for file sizes.
     """
 
     # Function 'rootcheck'
     @staticmethod
     def rootcheck() -> bool:
         """
-        Determine whether the current process is running as the root user.
-        Used to decide if system-wide cleanup operations are permitted.
-        Returns True when effective UID is 0; otherwise False.
+        Checks if the current process has root (superuser) privileges.
+        Returns True if effective user ID is 0 (root), otherwise False.
+        Used to determine if system-wide cleanup operations are permitted.
         """
         return os.geteuid() == 0
 
@@ -385,9 +386,9 @@ class SysUtils:
     @staticmethod
     def unitsize(numbytes: int) -> str:
         """
-        Convert a raw byte count into a human-readable string with units.
-        Iteratively scales in powers of 1024 through KB, MB, GB, etc.
-        Always returns a string like '12.34 MB' even on invalid input.
+        Converts a byte count into a human-readable string with appropriate units.
+        Supports units from Bytes up to Yottabytes using 1024-based conversion.
+        Returns formatted string like "1.50 MB" or "0.00 Bytes" for invalid input.
         """
         try:
             n = max(0, int(numbytes))
@@ -405,9 +406,9 @@ class SysUtils:
     @staticmethod
     def mtimestring(p: Path) -> str:
         """
-        Format a path's modification time into a YYYY-MM-DD HH:MM:SS string.
-        Returns '-' on error or when the timestamp cannot be read.
-        Useful for presenting file information in the UI table.
+        Retrieves the last modification timestamp of a file or directory.
+        Returns the timestamp as a formatted string (YYYY-MM-DD HH:MM:SS).
+        Returns a dash '-' if the file cannot be accessed or doesn't exist.
         """
         try:
             return datetime.fromtimestamp(p.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
@@ -418,9 +419,9 @@ class SysUtils:
     @staticmethod
     def filesize(p: Path) -> int:
         """
-        Compute size in bytes for a file, or shallow total for a directory.
-        For directories, it sums direct children file sizes and ignores errors.
-        Returns 0 when size cannot be determined or the path is missing.
+        Calculates total size of a file or directory in bytes.
+        For directories, recursively sums sizes of all contained files.
+        Returns 0 if the path cannot be accessed or doesn't exist.
         """
         try:
             if p.is_file():
@@ -442,18 +443,18 @@ class SysUtils:
 # Class 'ShellExec'
 class ShellExec:
     """
-    Thin wrapper around subprocess helpers for executing shell commands.
-    Provides streaming run and capture utilities with simple error handling.
-    Keeps command execution details isolated from the business logic.
+    Handles execution of system shell commands with proper error handling.
+    Supports dry-run mode and user context switching for command execution.
+    Provides both simple command execution and output capture functionality.
     """
 
     # Function 'cmdrun'
     @staticmethod
     def cmdrun(cmd: str, dryrun: bool) -> int:
         """
-        Execute a shell command, optionally skipping when in dry-run mode.
-        Streams stdout lines to avoid buffering, returning the exit code.
-        Any subprocess errors produce a non-zero (1) return value.
+        Executes a shell command with optional dry-run mode simulation.
+        In dry-run mode, returns 0 without actually executing the command.
+        Returns the command's exit code (0 for success, non-zero for failure).
         """
         if dryrun:
             return 0
@@ -478,9 +479,9 @@ class ShellExec:
     @staticmethod
     def stdcapture(cmd: str) -> Tuple[int, str]:
         """
-        Run a command and capture combined stdout/stderr as text.
-        Returns a tuple of (exit_code, output) for downstream parsing.
-        On failure, exit_code is non-zero and output contains the error.
+        Executes a command and captures both its stdout and stderr output.
+        Returns a tuple containing the exit code and the combined output string.
+        Handles CalledProcessError by returning the error code and output.
         """
         try:
             out = subprocess.check_output(cmd, shell=True, stderr=subprocess.STDOUT, text=True)
@@ -494,9 +495,9 @@ class ShellExec:
     @staticmethod
     def userexec(username: str, home: str, cmd: str, dryrun: bool) -> int:
         """
-        Execute a command as a specific user (used for 'trash-empty').
-        Tries runuser/sudo/su fallbacks. Ensures HOME is set for the target.
-        Returns the exit code (0 on success). In dry-run, returns 0.
+        Executes a command as a specific user with their environment variables.
+        Attempts multiple methods (unuser, sudo, su) to switch user context.
+        Returns 0 on success, 1 if all user switching attempts fail.
         """
         if dryrun:
             return 0
@@ -524,18 +525,18 @@ class ShellExec:
 # Class 'ProcessManager'
 class ProcessManager:
     """
-    Best-effort helper to gracefully close user applications before cleaning.
-    It sends SIGTERM to most user processes (excluding this app and a small
-    safeguard list) and, after a grace period, SIGKILL to stubborn ones.
+    Manages user processes termination before system cleanup operations.
+    Identifies and gracefully terminates non-essential user processes.
+    Uses SIGTERM first, then SIGKILL for processes that don't terminate.
     """
 
-    # Function 'closeprograms'
+    # Function 'closetasks'
     @staticmethod
-    def closeprograms(username: str, excpids: Optional[set] = None, gracesecs: int = 5) -> None:
+    def closetasks(username: str, excpids: Optional[set] = None, gracesecs: int = 5) -> None:
         """
-        Attempt to close all processes for 'username' except those in excpids
-        and a conservative skiplist. Uses 'ps' to enumerate processes and 'os.kill'
-        for signaling. Errors are tolerated to avoid crashing the GUI.
+        Terminates non-critical processes belonging to a specific user.
+        Skips essential system processes like Xorg, dbus, and shell components.
+        Waits specified grace period before force-killing remaining processes.
         """
         if not username:
             return
@@ -602,9 +603,9 @@ class ProcessManager:
 @dataclass
 class ExecOpts:
     """
-    Execution options controlling behavior of cleanup operations.
-    Encapsulates dry-run, browser/kernel flags, journal limits, and targets.
-    Instances serialize to/from dict for config persistence and IPC.
+    Configuration container for cleanup operation parameters.
+    Stores all runtime options including dry-run mode and cleanup categories.
+    Provides serialization methods for saving and loading configuration.
     """
 
     # Define 'dryrun'
@@ -652,9 +653,9 @@ class ExecOpts:
     # Function 'todict'
     def todict(self) -> dict:
         """
-        Convert this ExecOpts instance into a plain serializable dict.
-        Used for saving preferences and passing to elevated workers.
-        Returns a dict with primitive types suitable for JSON.
+        Converts the ExecOpts instance into a dictionary for serialization.
+        Maps each configuration field to its corresponding dictionary key.
+        Used for saving configuration to JSON or config files.
         """
         return {
             "dryrun": self.dryrun,
@@ -677,9 +678,9 @@ class ExecOpts:
     @staticmethod
     def fromdict(d: dict) -> "ExecOpts":
         """
-        Build an ExecOpts instance from a dictionary of values.
-        Applies sensible defaults and coerces types for robustness.
-        Returns a new ExecOpts configured by the provided mapping.
+        Creates an ExecOpts instance from a dictionary configuration.
+        Applies type conversion and provides safe defaults for missing keys.
+        Used for loading saved configuration from storage.
         """
         return ExecOpts(
             dryrun=bool(d.get("dryrun", False)),
@@ -702,18 +703,18 @@ class ExecOpts:
 # Class 'ConfigManager'
 class ConfigManager:
     """
-    Read/write helper for the simple key=value configuration file.
-    Loads user preferences on startup and persists updates when changed.
-    Hides filesystem details and error handling behind a clean API.
+    Handles persistent storage and retrieval of application configuration.
+    Reads/writes key-value pairs from/to the configuration file in XDG config directory.
+    Manages both user preferences and program-specific cleanup options.
     """
 
     # Function 'load'
     @staticmethod
     def load() -> dict:
         """
-        Load configuration from CONFIGFILE into a dict of strings.
-        Ignores comments/blank lines and safely handles decoding errors.
-        Returns an empty dict when no config exists or on failure.
+        Loads configuration from the config file into a dictionary.
+        Parses each line as key=value pairs, ignoring comments and empty lines.
+        Returns an empty dictionary if the config file doesn't exist or is invalid.
         """
         data: Dict[str, str] = {}
         try:
@@ -732,9 +733,9 @@ class ConfigManager:
     @staticmethod
     def save(opts: ExecOpts, runbootstart: bool, runshutdown: bool, pathopts: Dict[str, bool]):
         """
-        Persist ExecOpts, scheduler flags, and per-path options to disk.
-        Writes a simple key=value file under ~/.config/blitzsweep/config.
-        Silently ignores filesystem errors to avoid crashing the UI.
+        Saves application configuration to the config file.
+        Includes general options, boot/shutdown flags, and path-specific preferences.
+        Creates the config directory if it doesn't already exist.
         """
         try:
             CONFIGPATH.mkdir(parents=True, exist_ok=True)
@@ -768,18 +769,18 @@ class ConfigManager:
 # Class 'UserDiscovery'
 class UserDiscovery:
     """
-    Utilities to discover local users and their home directories.
-    Enumerates /root and /home/*, prioritizing the current user first.
-    Used to populate the target user selector in the GUI.
+    Discovers and lists all user accounts available on the system.
+    Includes root user and all regular users with home directories under /home.
+    Sorts users with the current user prioritized at the top of the list.
     """
 
     # Function 'listusers'
     @staticmethod
     def listusers() -> List[Tuple[str, str]]:
         """
-        Return a list of (username, home_path) tuples available on the system.
-        Includes 'root' if /root exists and all subdirectories under /home.
-        Sorts with the current user first to improve default selection.
+        Returns a list of tuples containing username and home directory path.
+        Scans /root and /home directories to identify all system users.
+        Sorts results to place the currently logged-in user first.
         """
         users: List[Tuple[str, str]] = []
         if os.path.isdir("/root"):
@@ -799,18 +800,18 @@ class UserDiscovery:
 # Class 'FileOps'
 class FileOps:
     """
-    Filesystem operations for deleting, wiping, and enumerating paths.
-    Emits rows through a callback so the UI can display progress.
-    Provides safe, error-tolerant helpers for recursive operations.
+    Performs file and directory operations with safety checks and callbacks.
+    Supports dry-run mode to preview deletions without actually removing files.
+    Provides methods for single file, recursive directory, and pattern-based deletions.
     """
 
     # Function 'emitrow'
     @staticmethod
     def emitrow(cb: FileRowCB, p: Path):
         """
-        Produce a single table row for the given path via callback.
-        Computes size and mtime string before invoking the callback.
-        Keeps UI updates decoupled from filesystem traversal logic.
+        Emits a file entry to the callback with its size and modification time.
+        Calculates size using SysUtils and formats the timestamp appropriately.
+        Used for reporting deleted items during cleanup operations.
         """
         size = SysUtils.filesize(p)
         mtime = SysUtils.mtimestring(p)
@@ -820,9 +821,9 @@ class FileOps:
     @staticmethod
     def removefile(path: Path, dryrun: bool, cb: FileRowCB) -> int:
         """
-        Delete a file or directory path and report reclaimed bytes.
-        Honors dry-run mode and emits a row before removal attempts.
-        Returns the estimated size removed; errors are swallowed safely.
+        Removes a single file or symbolic link and reports its size.
+        Returns the size of the removed file (or 0 for directories).
+        In dry-run mode, only reports the file without actual deletion.
         """
         try:
             if not path.exists():
@@ -852,9 +853,9 @@ class FileOps:
     @staticmethod
     def removetree(path: Path, dryrun: bool, cb: FileRowCB) -> int:
         """
-        Recursively remove a directory tree and sum contained file sizes.
-        Emits rows for the parent and all children to show detailed progress.
-        Returns the total size estimate; respects dry-run mode.
+        Recursively removes an entire directory tree and reports total size.
+        Calculates cumulative size of all contained files before deletion.
+        Returns total bytes freed (or estimated size in dry-run mode).
         """
         try:
             if not path.exists():
@@ -884,9 +885,9 @@ class FileOps:
     @staticmethod
     def wipedir(path: Path, dryrun: bool, cb: FileRowCB) -> int:
         """
-        Remove all children of a directory without deleting the directory itself.
-        Iterates files and subfolders, using removefile/removetree as needed.
-        Returns total estimated bytes affected; tolerates filesystem errors.
+        Wipes all contents of a directory without removing the directory itself.
+        Recursively deletes all files and subdirectories inside the target.
+        Returns total bytes freed from all deleted items.
         """
         if not path.exists() or not path.is_dir():
             return 0
@@ -901,13 +902,13 @@ class FileOps:
         except (OSError, PermissionError, FileNotFoundError):
             return 0
 
-    # Function 'globaldelete'
+    # Function 'globaldel'
     @staticmethod
-    def globaldelete(dirpath: Path, pattern: str, dryrun: bool, cb: FileRowCB) -> int:
+    def globaldel(dirpath: Path, pattern: str, dryrun: bool, cb: FileRowCB) -> int:
         """
-        Delete files matching a glob-like pattern under a base directory.
-        Emits rows for matched paths and honors dry-run for safety.
-        Returns the total estimated bytes removed or 0 on failure.
+        Deletes all files matching a glob pattern within a directory tree.
+        Searches recursively through all subdirectories for matching files.
+        Returns total size of all deleted files matching the pattern.
         """
         if not dirpath.exists() or not dirpath.is_dir():
             return 0
@@ -928,18 +929,18 @@ class FileOps:
 # Class 'DockerCleaner'
 class DockerCleaner:
     """
-    Best-effort Docker cleanup helper (containers/images/volumes/networks).
-    Mirrors the common full-clean sequence while tolerating missing Docker.
-    Honors dry-run mode and avoids errors when resource lists are empty.
+    Cleans up Docker resources including containers, images, volumes, and networks.
+    Executes Docker commands to remove unused or all resources based on options.
+    Supports dry-run mode to preview operations without executing them.
     """
 
     # Function 'clean'
     @staticmethod
     def clean(opts: "ExecOpts") -> None:
         """
-        Run cleanup steps based on ExecOpts flags for Docker resources.
-        Each step quietly skips when there is nothing to remove or Docker is absent.
-        Designed to be safe with dry-run and partial selections.
+        Performs Docker cleanup based on the provided execution options.
+        Stops and removes containers, then removes images, volumes, and networks.
+        Finally runs system prune to clean up remaining dangling resources.
         """
         dryrun = opts.dryrun
         if opts.dockercontainers:
@@ -972,17 +973,17 @@ class DockerCleaner:
 # Class 'SysCleaner'
 class SysCleaner:
     """
-    Core cleanup engine orchestrating user and system deletions.
-    Walks configured paths, honors options, and reports progress via callback.
-    Supports cancellation and tallies total reclaimed bytes.
+    Core cleanup engine that orchestrates system and user file removal.
+    Tracks total bytes freed and supports cancellation via stop flag.
+    Handles both system-wide operations and per-user cleanup tasks.
     """
 
     # Function '__init__'
     def __init__(self, opts: ExecOpts, filecb: FileRowCB, pathopts: Dict[str, bool]):
         """
-        Initialize a SysCleaner with execution options and UI callback.
-        Stores path enable/disable map and prepares byte counters/state.
-        Does not start work until run() is invoked.
+        Initializes the cleaner with configuration, callback, and path options.
+        Sets up tracking variables for bytes freed during cleanup operations.
+        Prepares counters for home and root directory cleanup statistics.
         """
         self.opts = opts
         self.filecb = filecb
@@ -997,18 +998,18 @@ class SysCleaner:
     # Function 'loadstop'
     def loadstop(self):
         """
-        Request that the running cleanup operation be canceled.
-        Sets an internal flag checked periodically during traversal.
-        Long-running operations exit gracefully by raising at checkpoints.
+        Sets the stop flag to request cancellation of ongoing cleanup.
+        Called by UI when user clicks the stop button during operation.
+        Triggers graceful termination of the cleanup process.
         """
         self.stopflag = True
 
     # Function 'checkstop'
     def checkstop(self):
         """
-        Guard method to abort work when a stop request has been made.
-        Raises RuntimeError to unwind current operation safely.
-        Call frequently inside loops to keep UI responsive.
+        Checks if a stop has been requested and raises exception if true.
+        Called at checkpoints during cleanup to enable graceful cancellation.
+        Throws RuntimeError to unwind the call stack when stop is requested.
         """
         if self.stopflag:
             raise RuntimeError("Operation cancelled by user.")
@@ -1016,21 +1017,21 @@ class SysCleaner:
     # Function 'addbytes'
     def addbytes(self, n: int):
         """
-        Add a byte count to the running total with defensive casting.
-        Ignores invalid or overflow inputs to keep counters robust.
-        Used by file operations to accumulate reclaimed sizes.
+        Adds bytes to the total counter for freed space tracking.
+        Safely handles type conversion and overflow errors.
+        Updates running total of reclaimed disk space.
         """
         try:
             self.totalbytes += int(n)
         except (ValueError, TypeError, OverflowError):
             pass
 
-    # Function 'enabled'
-    def enabled(self, key: str) -> bool:
+    # Function 'pathkey'
+    def pathkey(self, key: str) -> bool:
         """
-        Check if a given logical path key is enabled for cleaning.
-        Reads from the per-path options map provided by preferences.
-        Returns True when enabled or missing (defaults to enabled).
+        Checks whether a specific path or category is enabled for cleanup.
+        Returns True if the key is not explicitly disabled in preferences.
+        Used to filter which directories and file types to process.
         """
         return self.pathopts.get(key, True)
 
@@ -1038,9 +1039,9 @@ class SysCleaner:
     @staticmethod
     def sumtree(p: Path) -> int:
         """
-        Recursively sum file sizes under path p without emitting rows.
-        Returns total bytes; tolerates permission/file-not-found errors.
-        Does not follow directory symlinks during traversal.
+        Calculates total size of a directory tree recursively.
+        Sums sizes of all files while ignoring permission errors.
+        Returns 0 for non-existent paths or files that can't be read.
         """
         total = 0
         try:
@@ -1060,9 +1061,9 @@ class SysCleaner:
     # Function 'trashlist'
     def trashlist(self, username: str, home: str):
         """
-        List items in user's Trash and then empty it using 'trash-empty'.
-        This emits a row per top-level trash item and adds their sizes
-        to the reclaimed bytes counter before actually emptying.
+        Empties the trash directory for a specific user.
+        Reports sizes of items in trash before emptying.
+        Executes trash-empty command to permanently remove deleted files.
         """
         trash_dir = Path(home) / ".local/share/Trash/files"
         if trash_dir.is_dir():
@@ -1081,11 +1082,11 @@ class SysCleaner:
     # Function 'useritem'
     def useritem(self, uh: Path, rel: str):
         """
-        Clean a user-relative path (file or directory) if enabled.
-        Expands and dispatches to wipe or remove operations as needed.
-        Accumulates reclaimed bytes and emits progress rows.
+        Deletes a specific user file or directory relative to home.
+        Checks if the item is enabled via path options before processing.
+        Handles both files and directories with appropriate deletion methods.
         """
-        if not self.enabled(rel):
+        if not self.pathkey(rel):
             return
         p = (uh / rel).expanduser()
         if p.is_dir():
@@ -1096,11 +1097,11 @@ class SysCleaner:
     # Function 'userpattern'
     def userpattern(self, uh: Path, pat: str):
         """
-        Resolve and clean pattern-based user paths (including wildcards).
-        Supports '*', '/*/' segments, and '~' home expansion cases.
-        Applies appropriate remove/wipe semantics and sums reclaimed bytes.
+        Deletes files matching a pattern within a user's home directory.
+        Supports wildcards and star patterns for flexible file matching.
+        Handles special patterns like /*/ for nested directory traversal.
         """
-        if not self.enabled(pat):
+        if not self.pathkey(pat):
             return
         if pat.startswith("~"):
             base = Path(os.path.expanduser("~"))
@@ -1138,11 +1139,12 @@ class SysCleaner:
                 else:
                     self.addbytes(FileOps.removefile(t, self.opts.dryrun, self.filecb))
 
-    # Function 'removecargoline'
-    def removecargoline(self, filepath: Path, removecontent: str):
+    # Function 'remcargo'
+    def remcargo(self, filepath: Path, removecontent: str):
         """
-        Remove the Cargo line from a shell config file.
-        Handles the line removal and trailing newlines properly.
+        Removes Cargo environment configuration lines from shell profile files.
+        Creates a backup before modifying the file for safety.
+        Skips lines containing the specified content to be removed.
         """
         try:
             if self.opts.dryrun:
@@ -1179,22 +1181,19 @@ class SysCleaner:
                     pass
 
                 self.filecb(f"Removed Cargo line from {filepath}", 0, "-")
-            else:
-                self.filecb(f"No Cargo line found in {filepath}", 0, "-")
 
         except (OSError, PermissionError, UnicodeDecodeError) as e:
             self.filecb(f"Failed to process {filepath}: {str(e)}", 0, "-")
 
-    # Function 'cleanupprograms'
-    def cleanupprograms(self, uh: Path):
+    # Function 'cleanuptasks'
+    def cleanuptasks(self, uh: Path):
         """
-        Clean program-specific paths based on user selection.
-        If a program is enabled in pathopts, remove all its associated paths.
-        Special handling for Evolution: also run dconf reset command.
-        Special handling for Cargo: also remove from shell config files.
+        Cleans up application-specific directories for various programs.
+        Processes each program defined in PROGRAMS dictionary.
+        Handles special cases like Evolution dconf reset and Cargo config cleanup.
         """
         for program_name, program_data in PROGRAMS.items():
-            if not self.enabled(f"program.{program_name}"):
+            if not self.pathkey(f"program.{program_name}"):
                 continue
             self.checkstop()
 
@@ -1207,14 +1206,14 @@ class SysCleaner:
                     else:
                         self.addbytes(FileOps.removefile(p, self.opts.dryrun, self.filecb))
 
-            if program_name == "Evolution" and self.enabled(f"program.{program_name}"):
+            if program_name == "Evolution" and self.pathkey(f"program.{program_name}"):
                 self.checkstop()
                 if not self.opts.dryrun:
                     ShellExec.cmdrun("dconf reset -f /org/gnome/evolution/", dryrun=False)
                 else:
                     self.filecb("dconf reset -f /org/gnome/evolution/", 0, "-")
 
-            if program_name == "Cargo" and self.enabled(f"program.{program_name}"):
+            if program_name == "Cargo" and self.pathkey(f"program.{program_name}"):
                 self.checkstop()
                 if program_data["configfiles"] and program_data["removecontent"]:
                     for config_file in program_data["configfiles"]:
@@ -1222,20 +1221,19 @@ class SysCleaner:
                         if config_path.exists() and config_path.is_file():
                             removecontent = program_data.get("removecontent", "")
                             if isinstance(removecontent, str):
-                                self.removecargoline(config_path, removecontent)
+                                self.remcargo(config_path, removecontent)
 
     # Function 'cleanupuser'
     def cleanupuser(self, uh: Path):
         """
-        Perform all configured user-space cleanup operations for a home path.
-        Iterates USERPATH, USERHISTORY, USERBROWSERS, and USERAGGRESIVE.
-        Periodically checks for cancellation and updates byte totals.
-        Also lists and empties the user's Trash using 'trash-empty'.
+        Performs complete user-level cleanup for a specific home directory.
+        Empties trash, removes user paths, histories, browser caches, and misc files.
+        Also handles aggressive cleanup options if enabled by user.
         """
         username = Path(uh).name if str(uh) != "/root" else "root"
         self.trashlist(username=username, home=str(uh))
 
-        self.cleanupprograms(uh)
+        self.cleanuptasks(uh)
         for rel in USERPATH:
             self.checkstop()
             self.useritem(uh, rel)
@@ -1255,25 +1253,25 @@ class SysCleaner:
     # Function 'cleanupsystem'
     def cleanupsystem(self):
         """
-        Perform system-wide cleanup tasks requiring root when available.
-        Wipes caches, trims logs, removes snaps, and prunes old kernels.
-        Respects dry-run and per-path enablement; emits progress rows.
+        Performs system-wide cleanup operations requiring root privileges.
+        Cleans temporary directories, logs, journal entries, and package caches.
+        Removes old kernels, Docker resources, and root-specific configuration files.
         """
         if not SysUtils.rootcheck():
             return
 
         for d in SYSDIRS:
-            if not self.enabled(d):
+            if not self.pathkey(d):
                 continue
             self.checkstop()
             self.addbytes(FileOps.wipedir(Path(d), self.opts.dryrun, self.filecb))
 
         for base, pat in SYSGLOBS:
             key = f"{base}::{pat}"
-            if not self.enabled(key):
+            if not self.pathkey(key):
                 continue
             self.checkstop()
-            self.addbytes(FileOps.globaldelete(Path(base), pat, self.opts.dryrun, self.filecb))
+            self.addbytes(FileOps.globaldel(Path(base), pat, self.opts.dryrun, self.filecb))
 
         ShellExec.cmdrun(f"journalctl --vacuum-time={self.opts.vacuumdays}d", self.opts.dryrun)
         ShellExec.cmdrun(f"journalctl --vacuum-size={self.opts.vacuumsize}", self.opts.dryrun)
@@ -1308,7 +1306,7 @@ class SysCleaner:
                 pass
 
         for p in ROOTITEMS:
-            if not self.enabled(p):
+            if not self.pathkey(p):
                 continue
             self.checkstop()
             rp = Path(p)
@@ -1321,9 +1319,9 @@ class SysCleaner:
     @staticmethod
     def kernelused() -> str:
         """
-        Return the current kernel version string without the '-generic' suffix.
-        Used to identify which linux-image packages must be preserved.
-        Falls back to empty string on execution or parsing errors.
+        Returns the version string of the currently running kernel.
+        Removes the -generic suffix for consistent version comparison.
+        Used to identify which kernel versions should be preserved during cleanup.
         """
         ec, out = ShellExec.stdcapture("uname -r | sed 's/-generic//'")
         return out.strip() if ec == 0 else ""
@@ -1332,9 +1330,9 @@ class SysCleaner:
     @staticmethod
     def kernelold(basekernel: str) -> List[str]:
         """
-        List installed linux-image packages excluding the active kernel.
-        Parses dpkg output and filters by the provided current version.
-        Returns a list of package names safe to purge if desired.
+        Returns a list of old kernel package names excluding the current kernel.
+        Parses dpkg output to identify installed linux-image packages.
+        Filters out packages matching the base kernel to keep it safe.
         """
         ec, out = ShellExec.stdcapture("dpkg -l | awk '/^ii\\s+linux-image-[0-9]/{print $2}'")
         pkgs: List[str] = []
@@ -1348,9 +1346,9 @@ class SysCleaner:
     # Function 'run'
     def run(self):
         """
-        Execute the full cleanup routine according to options and privileges.
-        Cleans each user's home (or selected home) and then system locations.
-        Honors cancellation and shutdown request; swallows non-fatal errors.
+        Main execution method that coordinates the entire cleanup process.
+        Handles both root and non-root execution contexts appropriately.
+        Initiates system shutdown after cleanup if the option is enabled.
         """
         try:
             if SysUtils.rootcheck():
@@ -1381,18 +1379,17 @@ class SysCleaner:
 # Class 'DialogPrefs'
 class DialogPrefs(QDialog):
     """
-    Modal preferences dialog for tuning cleanup behavior and scope.
-    Lets users configure journal limits, snap retention, and path toggles.
-    Produces updated ExecOpts and path option maps on acceptance.
+    Preferences dialog window for configuring cleanup options.
+    Provides tabs for general settings and detailed category selection.
+    Allows users to enable/disable specific paths and program cleanups.
     """
 
     # Function '__init__'
-    def __init__(self, parent: QWidget, opts: ExecOpts, runbootstart: bool, runshutdown: bool,
-                 pathopts: Dict[str, bool]):
+    def __init__(self, parent: QWidget, opts: ExecOpts, runbootstart: bool, runshutdown: bool, pathopts: Dict[str, bool]):
         """
-        Construct the preferences dialog with the current settings snapshot.
-        Builds tabs for general options and per-path enablement checkboxes.
-        Values are staged locally until the dialog is accepted.
+        Initializes the preferences dialog with current configuration values.
+        Creates tabbed interface with general settings and detailed options.
+        Builds checkboxes for all configurable paths and program categories.
         """
         super().__init__(parent)
         self.setWindowTitle("Preferences")
@@ -1437,9 +1434,9 @@ class DialogPrefs(QDialog):
         # Function 'addsection'
         def addsection(title: str, keys: List[str]):
             """
-            Helper to add a titled group of checkboxes for a set of keys.
-            Initializes each checkbox from the current path options map.
-            Adds the completed group box into the Options tab layout.
+            Creates a grouped section of checkboxes for related configuration items.
+            Each checkbox represents a specific path or category that can be enabled/disabled.
+            Stores references to checkboxes in a dictionary for later value retrieval.
             """
             box = QGroupBox(title)
             inner = QVBoxLayout(box)
@@ -1450,11 +1447,12 @@ class DialogPrefs(QDialog):
                 inner.addWidget(cb)
             v.addWidget(box)
 
-        # Function 'addprogramsection'
-        def addprogramsection(title: str, programs: Dict[str, dict]):
+        # Function 'addblock'
+        def addblock(title: str, programs: Dict[str, dict]):
             """
-            Helper to add a titled group of checkboxes for programs.
-            Creates one checkbox per program with the program name.
+            Creates a grouped section for program-specific cleanup options.
+            Each program gets a checkbox to enable or disable its cleanup.
+            Program names are sorted alphabetically for consistent display.
             """
             box = QGroupBox(title)
             inner = QVBoxLayout(box)
@@ -1465,7 +1463,7 @@ class DialogPrefs(QDialog):
                 inner.addWidget(cb)
             v.addWidget(box)
 
-        addprogramsection("Programs", PROGRAMS)
+        addblock("Programs", PROGRAMS)
         addsection("User: Paths", USERPATH)
         addsection("User: Histories", USERHISTORY)
         addsection("User: Browsers", USERBROWSERS)
@@ -1517,9 +1515,9 @@ class DialogPrefs(QDialog):
     # Function 'addvalues'
     def addvalues(self) -> Tuple[ExecOpts, bool, bool, Dict[str, bool]]:
         """
-        Pull current widget state back into domain objects and flags.
-        Updates ExecOpts, boot/shutdown toggles, and per-path selections.
-        Returns a tuple (opts, runboot, runshutdown, pathopts).
+        Retrieves current values from all dialog controls and returns them.
+        Collects general settings, Docker options, and path-specific checkboxes.
+        Returns a tuple containing updated configuration and path options.
         """
         self.opts.shutafter = self.cbshutdown.isChecked()
         self.execbootstart = self.cbrunboot.isChecked()
@@ -1540,17 +1538,17 @@ class DialogPrefs(QDialog):
 # Custom 'DialogAbout'
 class DialogAbout(QDialog):
     """
-    Custom About dialog with app logo, version, and a clickable link.
-    Sized larger than QMessageBox and uses rich text for the website.
-    Falls back gracefully if the logo cannot be found on disk.
+    About dialog displaying application information and version details.
+    Shows application icon, name, version, website link, and description.
+    Provides a simple OK button to close the dialog window.
     """
 
     # Function '__init__'
     def __init__(self, parent: Optional[QWidget], version: str, website: str):
         """
-        Initialize the About dialog with branding and metadata.
-        Sets up logo, title, version, description, and a clickable website link.
-        Uses /usr/share/pixmaps/blitzsweep.png as the primary logo path with fallbacks.
+        Initializes the about dialog with application metadata.
+        Attempts to load the application icon from standard system paths.
+        Sets up layout with centered text and clickable website link.
         """
         super().__init__(parent)
         self.setWindowTitle(f"About {APPNAME}")
@@ -1612,17 +1610,17 @@ class DialogAbout(QDialog):
 # Custom 'DialogCompleted'
 class DialogCompleted(QDialog):
     """
-    Modal dialog to notify the user that cleanup is complete.
-    Shows a 128×128 PNG icon, a confirmation message, and a close button.
-    Centers relative to the parent window and supports the standard close.
+    Dialog shown after cleanup completion with success or error message.
+    Displays appropriate icon and message based on operation outcome.
+    Provides visual feedback to user about cleanup results.
     """
 
     # Function '__init__'
     def __init__(self, parent: Optional[QWidget], error_message: Optional[str] = None):
         """
-        Build the completion dialog with icon, text and a Close button.
-        Attempts to load an app icon from known locations with fallbacks.
-        Keeps the layout compact and visually centered in the parent.
+        Initializes completion dialog with success or failure information.
+        Loads corresponding icon (success or error) from system paths.
+        Sets dialog title and message based on error presence.
         """
         super().__init__(parent)
         self.setWindowTitle("Cleanup Completed" if not error_message else "Cleanup Failed")
@@ -1676,9 +1674,9 @@ class DialogCompleted(QDialog):
     # Function 'showcenter'
     def showcenter(self):
         """
-        Show the dialog centered over its parent window.
-        Adjusts size before placement to ensure correct centering.
-        Uses the parent's geometry for accurate positioning.
+        Centers the dialog relative to its parent window before showing.
+        Calculates optimal position to place dialog in the middle of parent.
+        Executes the dialog modally after positioning.
         """
         self.adjustSize()
         parent_obj = self.parent()
@@ -1692,9 +1690,9 @@ class DialogCompleted(QDialog):
 # Class 'BlitzSweep'
 class BlitzSweep(QWidget):
     """
-    Main GUI window for BlitzSweep, an Ubuntu cleanup tool.
-    Provides run/dry-run controls, live progress table, and preferences.
-    Delegates cleanup work to a background thread for responsiveness.
+    Main application window for BlitzSweep cleanup tool.
+    Provides user interface with user selection, cleanup controls, and results display.
+    Manages cleanup operations in background threads with real-time progress updates.
     """
 
     # Define 'completed'
@@ -1703,9 +1701,9 @@ class BlitzSweep(QWidget):
     # Function '__init__'
     def __init__(self):
         """
-        Initialize the main window, menus, widgets, and signals.
-        Sets up periodic queue flushing to stream file rows to the table.
-        Loads persisted configuration and primes default execution options.
+        Initializes the main window with menu bar, controls, and table view.
+        Sets up user selection combo box with discovered system users.
+        Configures timer for batch processing of file deletion updates.
         """
         super().__init__()
         iconpath = Path("/usr/share/pixmaps/blitzsweep.png")
@@ -1823,7 +1821,7 @@ class BlitzSweep(QWidget):
         self.showbytes = 0
 
         self.confloader()
-        self.completed.connect(self.complethandler)
+        self.completed.connect(self.showhandler)
         self.fadeanimation: Optional[QPropertyAnimation] = None
 
     # Function 'confloader'
@@ -1838,18 +1836,18 @@ class BlitzSweep(QWidget):
         # Function 'loadbool'
         def loadbool(key: str, default: bool = False) -> bool:
             """
-            Convert a config truthy string into a boolean with default.
-            Accepts '1/true/True/yes' as True; everything else is False.
-            Helps keep config parsing concise and consistent.
+            Helper function to convert config string values to boolean.
+            Recognizes common true values like '1', 'true', 'True', 'yes'.
+            Returns default value if key is not present in configuration.
             """
             return cfg.get(key, "1" if default else "0") in ("1", "true", "True", "yes")
 
         # Function 'loadstring'
         def loadstring(key: str, default: str = "") -> str:
             """
-            Fetch a string value from config or return the provided default.
-            Keeps missing keys from raising exceptions or returning None.
-            Used for simple text fields like vacuum size and username.
+            Helper function to retrieve string values from configuration.
+            Returns default value if the configuration key doesn't exist.
+            Used for loading text-based configuration parameters.
             """
             return cfg.get(key, default)
 
@@ -1900,9 +1898,9 @@ class BlitzSweep(QWidget):
     # Function 'confpersist'
     def confpersist(self):
         """
-        Persist current options and selections back to the config file.
-        Captures username, home, and all per-path enablement flags.
-        Keeps preferences in sync between sessions and worker runs.
+        Saves current configuration to persistent storage.
+        Retrieves current user selection and writes all options to config file.
+        Called when preferences are changed or before starting cleanup.
         """
         user, home = self.cmb_user.currentData()
         self.opts.username = user
@@ -1912,19 +1910,18 @@ class BlitzSweep(QWidget):
     # Function 'filerow'
     def filerow(self, path: str, size_bytes: int, mtime: str):
         """
-        Enqueue a file row for the GUI table from background threads.
-        Transfers data through a thread-safe queue to avoid UI races.
-        Actual insertion is performed during periodic flushes.
+        Adds a file entry to the queue for table display.
+        Called from worker thread to report deleted files.
+        Queues items for batch processing in the main thread.
         """
         self.file_queue.put((path, size_bytes, mtime))
 
     # Function 'flushrows'
     def flushrows(self):
         """
-        Periodically drain queued rows and append them to the table widget.
-        Converts byte counts to human-readable units before display.
-        Keeps the UI responsive by avoiding heavy work in the main loop.
-        Also increments the live 'Cleared Space' counter.
+        Processes queued file entries and updates the display table.
+        Batches multiple updates to improve UI performance.
+        Updates total cleared space counter as items are displayed.
         """
         updated = False
         try:
@@ -1947,9 +1944,9 @@ class BlitzSweep(QWidget):
     # Function 'onabout'
     def onabout(self):
         """
-        Display a larger About dialog with logo and website link.
-        Uses a custom QDialog for layout control and clickable links.
-        Provides application metadata in a visually centered layout.
+        Opens the about dialog when menu item is clicked.
+        Displays application information and version details.
+        Creates and shows modal about dialog window.
         """
         dlg = DialogAbout(self, VERSION, WEBSITEURL)
         dlg.exec()
@@ -1957,9 +1954,9 @@ class BlitzSweep(QWidget):
     # Function 'onprefs'
     def onprefs(self):
         """
-        Open the preferences dialog and apply any accepted changes.
-        Updates in-memory options and persists them to disk immediately.
-        Also refreshes the path options map for the next run.
+        Opens preferences dialog when menu item is clicked.
+        Updates configuration with user's changes if dialog is accepted.
+        Saves modified preferences to persistent storage.
         """
         dlg = DialogPrefs(self, self.opts, self.prefsexecbootstart, self.prefsexecshutdown, self.pathopts)
         if dlg.exec() == QDialog.DialogCode.Accepted:
@@ -1973,9 +1970,9 @@ class BlitzSweep(QWidget):
     # Function 'onstop'
     def onstop(self):
         """
-        Signal the running cleaner to cancel and disable the Stop button.
-        Has no effect when no worker is active or already stopping.
-        UI state is updated to reflect that cancellation is in progress.
+        Handles stop button click to cancel running cleanup.
+        Signals the cleaner to stop at the next checkpoint.
+        Disables stop button to prevent multiple stop requests.
         """
         if self.cleaner:
             self.cleaner.loadstop()
@@ -1984,10 +1981,9 @@ class BlitzSweep(QWidget):
     # Function 'onrun'
     def onrun(self, dry: bool):
         """
-        Start a cleanup task (dry-run or live) in a background thread.
-        Handles privilege elevation via pkexec when 'root' is selected.
-        Manages UI state, progress indicator, and row streaming lifecycle.
-        Also attempts to close user programs automatically before cleaning.
+        Initiates cleanup operation in a background thread.
+        Clears previous results and disables buttons during operation.
+        Handles both direct execution and privilege-escalated worker processes.
         """
         self.table.setRowCount(0)
         self.showbytes = 0
@@ -2006,7 +2002,7 @@ class BlitzSweep(QWidget):
 
         if not self.opts.dryrun and self.opts.username and SysUtils.rootcheck():
             try:
-                ProcessManager.closeprograms(
+                ProcessManager.closetasks(
                     self.opts.username,
                     excpids={os.getpid()},
                     gracesecs=5
@@ -2024,9 +2020,9 @@ class BlitzSweep(QWidget):
         # Function 'workload'
         def workload():
             """
-            Worker function executed on a background thread.
-            Runs cleanup locally or via pkexec, streaming rows back to UI.
-            Restores UI controls when work completes or is canceled.
+            Background thread function that executes the cleanup process.
+            Handles privilege escalation via pkexec when needed for root operations.
+            Emits completion signal with success status and error message.
             """
             success = True
             errmsg = ""
@@ -2143,12 +2139,12 @@ class BlitzSweep(QWidget):
         self.workerthread = threading.Thread(target=workload, daemon=True)
         self.workerthread.start()
 
-    # Function 'complethandler'
-    def complethandler(self, success: bool, errmsg: str):
+    # Function 'showhandler'
+    def showhandler(self, success: bool, errmsg: str):
         """
-        Show a centered popup notifying that cleanup is complete.
-        Waits for user to close the popup via Close button or window close.
-        Then clears the file list with a smooth fade-out animation.
+        Handles completion signal from worker thread.
+        Shows appropriate completion dialog based on success status.
+        Initiates fade animation for results table when applicable.
         """
         if self.opts.dryrun:
             return
@@ -2160,9 +2156,9 @@ class BlitzSweep(QWidget):
     # Function 'fadecleaner'
     def fadecleaner(self):
         """
-        Fade out the table contents for a modern disappearance effect.
-        When the fade completes, clear all rows and restore full opacity.
-        Keeps the component responsive and visually pleasant for users.
+        Animates table fade-out after successful cleanup.
+        Applies opacity effect and creates fade animation.
+        Clears table rows after animation completes.
         """
         if self.table.rowCount() == 0:
             return
@@ -2178,9 +2174,11 @@ class BlitzSweep(QWidget):
 
         # Function 'fadeafter'
         def fadeafter():
-            """Clears all rows in the table after the fade animation ends.
-            Removes the opacity effect from the table to restore normal appearance.
-            Finalizes the fade-out process by resetting the table to its initial state."""
+            """
+            Clears the table and removes opacity effect after animation ends.
+            Called when fade animation completes to reset table display.
+            Ensures clean state for next cleanup operation.
+            """
             self.table.setRowCount(0)
             self.table.setGraphicsEffect(None)
 
@@ -2192,24 +2190,23 @@ class BlitzSweep(QWidget):
 # Class 'UpdateChecker'
 class UpdateChecker:
     """
-    Check GitHub releases for a newer version.
-    Show a modal popup reusing the About-style layout.
-    Intended to be called once at application startup.
+    Checks for application updates from GitHub releases.
+    Compares current version with latest available release.
+    Shows notification dialog when newer version is available.
     """
 
     # Function '__init__'
-    def __init__(self, parent: QWidget, appname: str, currvers: str, gitrepo: str,
-                 logo_paths: Optional[List[Path]] = None):
+    def __init__(self, parent: QWidget, appname: str, currvers: str, gitrepo: str, logopaths: Optional[List[Path]] = None):
         """
-        Store configuration needed for update checks.
-        Accepts parent widget, app name, current version and repo.
-        Optional logo paths override the default guessed location.
+        Initializes update checker with application metadata and GitHub repository.
+        Stores parent widget reference for dialog display.
+        Configures paths for loading application icon in notification dialog.
         """
         self.parent = parent
         self.appname = appname
         self.currvers = currvers
         self.gitrepo = gitrepo
-        self.logo_paths = logo_paths or [
+        self.logopaths = logopaths or [
             Path(f"/usr/share/pixmaps/{appname.lower()}.png")
         ]
 
@@ -2217,9 +2214,9 @@ class UpdateChecker:
     @staticmethod
     def versionparser(ver: str) -> Tuple[int, ...]:
         """
-        Parse a version string like 'v1.2.3' into integers.
-        Ignores any non-numeric suffixes after the core numbers.
-        Returns a tuple suitable for safe semantic comparison.
+        Parses version string into tuple of integers for comparison.
+        Strips leading 'v' or 'V' characters from version string.
+        Returns tuple with parts converted to integers for lexicographic comparison.
         """
         v = ver.strip()
         if v.startswith(("v", "V")):
@@ -2235,9 +2232,9 @@ class UpdateChecker:
     # Function 'checknewer'
     def checknewer(self, current: str, latest: str) -> bool:
         """
-        Compare two version strings in semantic order.
-        Pads shorter tuples with zeros before comparison.
-        Returns True when latest is strictly greater.
+        Compares two version strings to determine if latest is newer.
+        Normalizes version length by padding with zeros.
+        Returns True if latest version is greater than current version.
         """
         c = self.versionparser(current)
         l = self.versionparser(latest)
@@ -2246,12 +2243,27 @@ class UpdateChecker:
         l = l + (0,) * (ln - len(l))
         return c < l
 
+    # Function 'checknotify'
+    def checknotify(self, timeout: int = 3):
+        """
+        Checks for updates and shows notification if newer version exists.
+        Fetches latest version from GitHub and compares with current.
+        Shows update dialog when newer release is available.
+        """
+        latest = self.fetchtag(timeout=timeout)
+        if not latest:
+            return
+        if not self.checknewer(self.currvers, latest):
+            return
+        url = f"https://github.com/{self.gitrepo}/releases/tag/{latest}"
+        self.showupdate(latest, url)
+
     # Function 'fetchtag'
     def fetchtag(self, timeout: int = 3) -> Optional[str]:
         """
-        Call GitHub API to obtain the latest release tag.
-        Uses /repos/{repo}/releases/latest with a short timeout.
-        Returns the tag name string or None on any failure.
+        Fetches latest release tag name from GitHub API.
+        Makes HTTP request with timeout to prevent UI freezing.
+        Returns tag name string or None if request fails.
         """
         try:
             url = f"https://api.github.com/repos/{self.gitrepo}/releases/latest"
@@ -2271,27 +2283,12 @@ class UpdateChecker:
         except (HTTPError, URLError, socket.timeout, ValueError, OSError):
             return None
 
-    # Function 'checknotify'
-    def checknotify(self, timeout: int = 3):
-        """
-        Perform a single update check against GitHub releases.
-        If a newer tag exists, show the update popup dialog.
-        Intended to be called from the main GUI thread.
-        """
-        latest = self.fetchtag(timeout=timeout)
-        if not latest:
-            return
-        if not self.checknewer(self.currvers, latest):
-            return
-        url = f"https://github.com/{self.gitrepo}/releases/tag/{latest}"
-        self.showupdate(latest, url)
-
     # Function 'showupdate'
     def showupdate(self, latest: str, url: str):
         """
-        Build and display the update popup dialog.
-        Reuses the About layout with logo, text and link.
-        Blocks until user closes the window or presses OK.
+        Displays update notification dialog with version information.
+        Shows current version, latest version, and download link.
+        Provides OK button to dismiss dialog after reading.
         """
         dlg = QDialog(self.parent)
         dlg.setWindowTitle("Update Available")
@@ -2302,7 +2299,7 @@ class UpdateChecker:
         logolabel.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         pix: Optional[QPixmap] = None
-        for pth in self.logo_paths:
+        for pth in self.logopaths:
             if pth.is_file():
                 tmp = QPixmap(str(pth))
                 if not tmp.isNull():
@@ -2352,18 +2349,18 @@ class UpdateChecker:
 # Class 'AppEntry'
 class AppEntry:
     """
-    Minimal application bootstrapper for the BlitzSweep GUI/worker.
-    Runs the GUI normally or a worker process when invoked with --worker.
-    Encapsulates QApplication lifecycle and exit handling.
+    Application entry point handling command-line arguments and execution modes.
+    Supports worker mode for privilege-separated cleanup operations.
+    Initializes main application window and checks for updates.
     """
 
     # Function 'main'
     @staticmethod
     def main():
         """
-        Entry point that dispatches between GUI and privileged worker mode.
-        In worker mode, loads ExecOpts and path options, then runs SysCleaner.
-        Otherwise, starts the Qt application and shows the main window.
+        Main entry point for the BlitzSweep application.
+        Parses command line arguments to determine execution mode.
+        Starts Qt application, creates main window, and runs event loop.
         """
         if len(sys.argv) == 3 and sys.argv[1] == "--worker":
             opts_path = Path(sys.argv[2])
@@ -2373,14 +2370,14 @@ class AppEntry:
             cfg = ConfigManager.load()
             pathopts: Dict[str, bool] = {}
             all_keys = (
-                USERPATH
-                + USERHISTORY
-                + USERBROWSERS
-                + USERMISCS
-                + USERAGGRESIVE
-                + ROOTITEMS
-                + SYSDIRS
-                + [f"{base}::{pat}" for base, pat in SYSGLOBS]
+                    USERPATH
+                    + USERHISTORY
+                    + USERBROWSERS
+                    + USERMISCS
+                    + USERAGGRESIVE
+                    + ROOTITEMS
+                    + SYSDIRS
+                    + [f"{base}::{pat}" for base, pat in SYSGLOBS]
             )
 
             for k in all_keys:
@@ -2392,9 +2389,9 @@ class AppEntry:
             # Function 'rowcheckbox'
             def rowcheckbox(path: str, size_b: int, mtime: str):
                 """
-                Worker-side row emitter that prints TSV lines to stdout.
-                The GUI parses these lines to populate its progress table.
-                Keeps IPC simple and robust across privilege boundaries.
+                Callback function for worker mode to report file deletions.
+                Outputs tab-separated file information to stdout for parent process.
+                Used for real-time progress reporting from privileged worker.
                 """
                 print(f"ROW\t{path}\t{size_b}\t{mtime}", flush=True)
 
@@ -2417,15 +2414,21 @@ class AppEntry:
         os.environ["QT_LOGGING_RULES"] = "qt.qpa.*=false"
         signal.signal(signal.SIGINT, signal.SIG_DFL)
         app = QApplication(sys.argv)
+
+        if hasattr(QGuiApplication, "setDesktopFileName"):
+            QGuiApplication.setDesktopFileName("blitzsweep")
+
+        app.setApplicationName(f"{APPNAME}")
+        app.setWindowIcon(QIcon("/usr/share/pixmaps/blitzsweep.png"))
+
         win = BlitzSweep()
         win.show()
-
         checker = UpdateChecker(
             parent=win,
             appname=APPNAME,
             currvers=VERSION,
             gitrepo="neoslab/blitzsweep",
-            logo_paths=[Path("/usr/share/pixmaps/blitzsweep.png")],
+            logopaths=[Path("/usr/share/pixmaps/blitzsweep.png")],
         )
 
         win.updatecheck = checker
