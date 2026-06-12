@@ -63,7 +63,7 @@ from urllib.request import Request
 from urllib.request import urlopen
 
 # Define 'VERSION'
-VERSION = "v5.1.7"
+VERSION = "v5.1.8"
 
 # Define 'APPNAME'
 APPNAME = "BlitzSweep"
