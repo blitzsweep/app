@@ -63,7 +63,7 @@ from urllib.request import Request
 from urllib.request import urlopen
 
 # Define 'VERSION'
-VERSION = "v5.1.8"
+VERSION = "v5.1.9"
 
 # Define 'APPNAME'
 APPNAME = "BlitzSweep"
@@ -138,6 +138,15 @@ PROGRAMS = {
     },
     "Discord": {
         "paths": [".cache/discord", ".config/discord"],
+        "configfiles": [],
+        "removecontent": ""
+    },
+    "EasyEffects": {
+        "paths": [
+            ".cache/easyeffects",
+            ".config/easyeffects",
+            ".local/share/easyeffects"
+        ],
         "configfiles": [],
         "removecontent": ""
     },

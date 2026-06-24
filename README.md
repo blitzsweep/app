@@ -47,12 +47,12 @@ sudo apt install -y python3-pyqt6 trash-cli
 
 ## Installation
 
-Download the latest DEB version from the [releases](https://github.com/neoslab/blitzsweep/releases/) section (the current version is v5.1.8) and use the following command:
+Download the latest DEB version from the [releases](https://github.com/neoslab/blitzsweep/releases/) section (the current version is v5.1.9) and use the following command:
 
 ```bash
 cd /tmp/
-wget https://github.com/neoslab/blitzsweep/releases/download/v5.1.8/blitzsweep_5.1.8_all.deb
-sudo dpkg -i blitzsweep_5.1.8_all.deb
+wget https://github.com/neoslab/blitzsweep/releases/download/v5.1.9/blitzsweep_5.1.9_all.deb
+sudo dpkg -i blitzsweep_5.1.9_all.deb
 ```
 
 * * *
